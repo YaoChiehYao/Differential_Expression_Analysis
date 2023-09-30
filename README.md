@@ -1,5 +1,5 @@
-##  BINF 6309 Assignment 4 Differential expression analysis
-Author: Yao Chieh Yao
+BINF 6309 Assignment 4 
+# Project Name: Differential expression analysis
 
 
 ## Description
