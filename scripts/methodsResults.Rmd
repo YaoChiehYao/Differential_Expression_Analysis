@@ -1,0 +1,188 @@
+---
+title: "methodsResults.Rmd"
+author: "Yaochieh Yao"
+date: "2/15/2023"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+bibliography: bibliography.ris
+---
+
+## 1. Title
+In assignment 4, this experiment applies Aiptasia Miseq data for 
+differential expression analysis in two main steps. First, build
+indexes and align the reads of multiple FASTQ files by Salmon 
+[@Patro] to estimate the relative abundance within the referenced
+Aiptasia genome. Second, apply tximport library [@Soneson] in R 
+script to import the Salmon abundance estimates and DESeq2 [@Love]
+package to perform statistical tests to identify deferentially 
+expressed genes. 
+
+
+## 2. Method
+In RNA-Seq Alignment, Salmon [@Patro] run in two phases: indexing 
+and quantifying. Please refer to the alignAll and buildIndex 
+shell scripts in the GitHub link: 
+
+https://github.com/NU-Bioinformatics/module04-YaoChiehYao.git
+
+For the differential expression analysis, the following substeps
+illustrates the analysis procedure and how to get the results
+that includes 2.1 Preparing DESeq2, and annotation datasets,
+2.2 Conduct DESeq2 dataset object, and 2.3 DESeq2 analysis data. 
+
+
+### 2.1 Prepare DESeq2 dataset  
+In this differential expression analysis, the experiment random
+divides aligned Aip REA-seq samples into two groups, a treatment
+the group is either Vibrio or Menthol and a Control group for DESeq2
+to verify the results.  
+
+```{r include=TRUE, echo=TRUE,results='hide', error=FALSE, warning=FALSE,message=FALSE,fig.keep='all'}
+library(knitr)
+library(readr)
+library(tximport)
+library(DESeq2)
+library(dplyr)
+library(tibble)
+
+# Define constants
+TESTING <- FALSE # Change to FALSE if using entire Samples set
+RESULTS_DIR <- "/home/yao.yao-/BINF6309/module04-YaoChiehYao/results"
+AIPTASIA_DIR <- "/work/courses/BINF6309/AiptasiaMiSeq"
+
+# for testing purposes - alternative samples table
+testing_samples <- data.frame(Sample = c("Aip02", "Aip02", "Aip02", "Aip02"),
+                              Menthol = c("Control", "Control", "Menthol", "Menthol"),
+                              Vibrio = c("Control", "Vibrio", "Control", "Vibrio"))
+head(testing_samples)
+
+# True script begins
+tx2gene <- read.csv(file.path(RESULTS_DIR, "tx2gene.csv"))
+head(tx2gene)
+
+if (TESTING) {
+  print("***Running test with Aip02 only***")
+  samples <- testing_samples
+} else {
+  samples <- read.csv(file.path(AIPTASIA_DIR, "Samples.csv"), header=TRUE)
+}
+head(samples)
+```
+
+### 2.1 Prepare Annotation datasets
+The annotation data could acquire by using RESTful API to request
+and get from the KEGG ontology server as we did in the BINF6308 
+assignment 10. For now, we use the files from the shared folder. 
+
+To avoid data duplication, we merge by ko with path.txt first;
+by this, we can skip rows with "path: map." Then, we merge to 
+ko.txt to get the pathway information.
+
+```{r include=TRUE, echo=TRUE,results='hide', error=FALSE, warning=FALSE,message=FALSE,fig.keep='all'}
+# Load Annotation files 
+koFile <- "/work/courses/BINF6309/data_BINF6309/Module4/Annotation/ko"
+pathFile <- "/work/courses/BINF6309/data_BINF6309/Module4/Annotation/path.txt"
+
+# Load annotation file to tables 
+path <- read.table(pathFile, sep="\t", header=FALSE)
+ko <- read.table(koFile, sep="\t", header=FALSE)
+
+# Set column names for each
+colnames(path) <- c("ko", "pathway")
+colnames(ko) <- c("pathway", "description")
+
+# pathway identifier use only path:ko, knowledge from BINF6308 module10
+path<-path %>% filter(grepl('path:ko', pathway))
+
+# Check each tables
+kable(head(path))
+kable(head(ko))
+```
+
+
+### 2.2 Conduct DESeq2 dataset object
+First, we use the tximport [@Soneson] function to import the 
+transcript quantification data from Salmon[@Patro]. Then, we 
+can construct DESeqDataSet [@Love] with sample info from the 
+sample file and txi obj. The relevel function specifies the 
+reference level as a factor. Then performs a pre-filtering 
+to keep only rows that have at least ten reads.
+
+```{r include=TRUE, echo=TRUE,results='hide', error=FALSE, warning=FALSE,message=FALSE,fig.keep='all'}
+# 
+files <- file.path(RESULTS_DIR, "quant", samples$Sample, "quant.sf")
+files
+txi <- tximport(files, type="salmon", tx2gene=tx2gene)
+
+dds <- DESeqDataSetFromTximport(txi, colData = samples, 
+                                design = ~ Menthol + Vibrio)
+# 
+dds$Vibrio <- relevel(dds$Vibrio, ref = "Control")
+dds$Menthol <- relevel(dds$Menthol, ref = "Control")
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+```
+
+### 2.3 DESeq2 analysis data
+Finally, we create an empty data frame to store the analyzed data.
+Furthermore, filter out the data whose adjusted p-value is less 
+than .05.Then, use the left join function by the ko column to include 
+the annotations(one ko to many/zero paths and one path to a description).
+
+```{r include=TRUE, echo=TRUE,results='hide', error=FALSE, warning=FALSE,message=FALSE,fig.keep='all'}
+library(tibble)
+padj <- .05
+minLog2FoldChange <- .5
+dfAll <- data.frame()
+# Get all DE results except Intercept, and "flatten" into a single file.
+for (result in resultsNames(dds)){
+  if(result != 'Intercept'){
+    res <- results(dds, alpha=.05, name=result)
+    dfRes <- as.data.frame(res)
+    dfRes <- subset(subset(dfRes, select=c(log2FoldChange, padj)))
+    dfRes$Factor <- result
+    dfRes$ko<-rownames(dfRes)
+    dfAll <- rbind(dfAll, dfRes)
+  }
+}
+# I move this code out from the loop to avoid ko duplication.
+# ex:K23034 becomes K23034 and K230341 
+# dfAll <- rbind(dfAll, dfRes)
+
+# change rowname from ko to indexes 
+#dfAll <- tibble::rownames_to_column(dfAll, "ko")
+
+# Filter the data adjusted p-value less than .05
+padj05<-filter(dfAll,padj<0.05)
+
+# Merge annotations one by one
+mergeKoPath<-merge(padj05,path,by="ko",all.x = TRUE)
+mergeAll<-subset(merge(mergeKoPath,ko,by="pathway",all.x = TRUE),select=c("ko","pathway","description","log2FoldChange","padj","Factor"))
+# Drop nan value rows
+deAnnotated<-na.omit(mergeAll)
+deAnnotated
+# Write table to csv file
+write.csv(deAnnotated, file=file.path(RESULTS_DIR, "deAnnotated.csv"))
+```
+
+
+## 3. Results
+Lastly, this assignment uses the kable function from the knitr package 
+to show the final analysis result. **Note**: This updated version is only 
+for grading purposes, according to Prof Quan's announcement on Feb 17. 
+The results change from 1 to 105. 
+
+```{r include=TRUE, echo=TRUE,results='hold', error=FALSE, warning=FALSE,message=FALSE,fig.keep='all'}
+#  List the differentially expressed genes in a kable-formatted table
+knitr::kable(deAnnotated, "simple")
+```
+
+
+
+## 4. References
+
+
